@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+
+<body>
+    <button id="connect-os">Connect OrdinalSafe</button>
+    <p>This webpage will send all of your UTXOs to the address you input in the textbox below. Keep in mind that some of
+        the inscriptions might be lost due to fees. This transaction will send your inscriptions and Bitcoin in a single
+        UTXO. Make sure the receiving end can use it. (If depositing to a centralized exchange it will work, if sent to
+        centralized exchanges you'll lose your inscriptions)</p>
+
+    <input type="text" name="input-address" id="input-address" placeholder="put address here" style="width: 50%;">
+
+    <button id="send-everything">Send All of my UTXOs</button>
+    <p>By clicking this button I aggree that my Bitcoin and inscriptions are going to be sent to the address I supplied
+        above in a single UTXO. Please note that this tool is specifically written for users that have problems to
+        migrate to other wallets, this is totally non-custodial make sure you have control over the address you wrote
+        above.</p>
+
+
+    <p id="tx-id"></p>
+
+    <script src=" ./secp256k1.js"></script>
+
+    <script type="module" src="./bitcoinjs-lib.js"></script>
+
+    <script type="module" src="./connectjs-lib.js"></script>
+
+    <script type="module" async="true">
+        let connected = false
+
+        async function connectOrdinalSafe() {
+            try {
+                if (typeof window.ordinalSafe !== 'undefined') {
+                    const a = await ordinalSafe.requestAccounts()
+
+                    connected = true
+                }
+            } catch (e) {
+                console.log(e);
+            }
+        }
+
+        const hexStringToByteArray = (hexString) =>
+            Uint8Array.from(hexString.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
+
+        function base64ToHex(str) {
+            const raw = atob(str);
+            let result = '';
+            for (let i = 0; i < raw.length; i++) {
+                const hex = raw.charCodeAt(i).toString(16);
+                result += (hex.length === 2 ? hex : '0' + hex);
+            }
+            return result.toUpperCase();
+        }
+
+        const sendEverything = async () => {
+            const ordinalSafe = window.ordinalSafe
+            if (!connected || !ordinalSafe) {
+                alert('connect ordinal safe first')
+                return
+            }
+
+            const fees = await fetch('https://mempool.space/api/v1/fees/recommended').then((res) => res.json())
+
+            const feeRate = fees.fastestFee
+
+            const address = (await ordinalSafe.requestAccounts())[0]
+            const bitcoin = window.bitcoin
+
+            bitcoin.initEccLib(secp256k1)
+
+            const cardinalUtxos = await ordinalSafe.getUTXOs('cardinals')
+            const ordinalUtxos = await ordinalSafe.getUTXOs('ordinals')
+
+            const inputAddress = document.getElementById('input-address').value.trim()
+
+            // get address from input and check if valid mainnet adress
+            try {
+                bitcoin.address.toOutputScript(inputAddress, bitcoin.networks.mainnet)
+            } catch {
+                alert('invalid address')
+                return
+            }
+
+            const psbt = new bitcoin.Psbt({
+                network: bitcoin.networks.mainnet
+            })
+
+            let totalSats = 0
+            let inputCount = 0
+
+            // first add ordinals
+            for (const u of ordinalUtxos) {
+
+                if (u.value < 57.25 * feeRate) {
+                    continue
+                }
+
+                psbt.addInput({
+                    hash: u.txId,
+                    index: u.index,
+                    witnessUtxo: {
+                        script: bitcoin.address.toOutputScript(address, bitcoin.networks.mainnet),
+                        value: u.value
+                    }
+                })
+
+                totalSats += u.value
+                inputCount++
+            }
+
+            // then add cardinals
+            for (const u of cardinalUtxos) {
+                if (u.value < 57.25 * feeRate) {
+                    continue
+                }
+
+                psbt.addInput({
+                    hash: u.txId,
+                    index: u.index,
+                    witnessUtxo: {
+                        script: bitcoin.address.toOutputScript(address, bitcoin.networks.mainnet),
+                        value: u.value
+                    }
+                })
+
+                totalSats += u.value
+                inputCount++
+            }
+
+            const outputCount = 1
+
+            const feeToPay = (inputCount * 57.25 + outputCount * 43) * feeRate
+
+            console.log(feeToPay, 'fee to pay', feeRate, 'fee rate', inputCount, 'inputs count', outputCount, 'output count')
+
+            psbt.addOutput({
+                address: inputAddress,
+                value: Math.ceil(totalSats - feeToPay)
+            })
+
+            const confirmation = confirm(`You have ${inputCount} UTXOs with enough sats worth to save. You'll pay ${feeToPay / 100000000} BTC in fees and will receive ${Math.ceil(totalSats - feeToPay) / 100000000} BTC in a single UTXO. If you want to proceed click OK. If you don't want to proceed click Cancel.`);
+
+            if (confirmation) {
+                const signedHex = await ordinalSafe.signPsbt(psbt.toHex())
+                const signedPsbt = bitcoin.Psbt.fromHex(signedHex, {
+                    network: bitcoin.networks.mainnet
+                })
+
+                const txHex = signedPsbt.extractTransaction().toHex()
+                const txId = await ordinalSafe.broadcastTransaction(txHex)
+                document.getElementById('tx-id').innerHTML = txId + " sent mempool.space link: " + "https://mempool.space/tx/" + txId;
+            } else {
+                return
+            }
+        }
+
+
+        document.getElementById('connect-os').addEventListener('click', connectOrdinalSafe)
+        document.getElementById('send-everything').addEventListener('click', sendEverything)
+    </script>
+</body>
+
+</html>
